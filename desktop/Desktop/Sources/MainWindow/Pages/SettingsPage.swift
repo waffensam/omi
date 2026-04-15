@@ -1956,8 +1956,9 @@ struct SettingsContentView: View {
             Spacer()
 
             Picker("", selection: $chatBridgeMode) {
-              Text("omi account").tag("agentSDK")
-              Text("Your Claude Account").tag("claudeCode")
+              Text("omi account").tag(ChatProvider.BridgeMode.omiAI.rawValue)
+              Text("Your Claude Account").tag(ChatProvider.BridgeMode.userClaude.rawValue)
+              Text("Your ChatGPT Account (Codex)").tag(ChatProvider.BridgeMode.userCodex.rawValue)
             }
             .pickerStyle(.menu)
             .frame(width: 200)
@@ -1970,41 +1971,15 @@ struct SettingsContentView: View {
             }
           }
 
-          Text(
-            chatBridgeMode == "claudeCode"
-              ? "Using your Claude Pro/Max subscription. You'll be prompted to sign in with your Claude account."
-              : "Using your omi account."
-          )
+          Text(aiProviderDescription)
           .scaledFont(size: 12)
           .foregroundColor(OmiColors.textTertiary)
 
-          if chatBridgeMode == "claudeCode" && chatProvider?.isClaudeConnected == true {
-            Divider()
-
-            HStack {
-              Image(systemName: "checkmark.circle.fill")
-                .foregroundColor(.green)
-                .scaledFont(size: 12)
-              Text("Connected to Claude")
-                .scaledFont(size: 12)
-                .foregroundColor(OmiColors.textSecondary)
-
-              Spacer()
-
-              Button("Disconnect") {
-                Task {
-                  await chatProvider?.disconnectClaude()
-                }
-              }
-              .buttonStyle(.plain)
-              .scaledFont(size: 12, weight: .medium)
-              .foregroundColor(.red)
-            }
-          }
+          aiProviderStatusSection
         }
       }
       .onAppear {
-        chatProvider?.checkClaudeConnectionStatus()
+        refreshAIProviderConnectionStatus()
       }
 
       // Ask Mode card
@@ -2779,8 +2754,9 @@ struct SettingsContentView: View {
             Spacer()
 
             Picker("", selection: $chatBridgeMode) {
-              Text("omi account").tag("agentSDK")
-              Text("Your Claude Account").tag("claudeCode")
+              Text("omi account").tag(ChatProvider.BridgeMode.omiAI.rawValue)
+              Text("Your Claude Account").tag(ChatProvider.BridgeMode.userClaude.rawValue)
+              Text("Your ChatGPT Account (Codex)").tag(ChatProvider.BridgeMode.userCodex.rawValue)
             }
             .pickerStyle(.menu)
             .frame(width: 200)
@@ -2793,38 +2769,15 @@ struct SettingsContentView: View {
             }
           }
 
-          Text(
-            chatBridgeMode == "claudeCode"
-              ? "Use your Claude subscription for desktop chat."
-              : "Use your omi account for desktop chat."
-          )
+          Text(aiProviderDescription)
           .scaledFont(size: 12)
           .foregroundColor(OmiColors.textTertiary)
 
-          if chatBridgeMode == "claudeCode" && chatProvider?.isClaudeConnected == true {
-            Divider()
-
-            HStack {
-              Image(systemName: "checkmark.circle.fill")
-                .foregroundColor(.green)
-                .scaledFont(size: 12)
-              Text("Connected to Claude")
-                .scaledFont(size: 12)
-                .foregroundColor(OmiColors.textSecondary)
-
-              Spacer()
-
-              Button("Disconnect") {
-                Task {
-                  await chatProvider?.disconnectClaude()
-                }
-              }
-              .buttonStyle(.plain)
-              .scaledFont(size: 12, weight: .medium)
-              .foregroundColor(.red)
-            }
-          }
+          aiProviderStatusSection
         }
+      }
+      .onAppear {
+        refreshAIProviderConnectionStatus()
       }
 
       settingsCard(settingId: "aichat.workspace") {
@@ -5355,6 +5308,125 @@ struct SettingsContentView: View {
   }
 
   // MARK: - Helper Views
+
+  private var aiProviderDescription: String {
+    switch chatBridgeMode {
+    case ChatProvider.BridgeMode.userClaude.rawValue:
+      return "Using your Claude Pro/Max subscription. You'll be prompted to sign in with your Claude account."
+    case ChatProvider.BridgeMode.userCodex.rawValue:
+      return "Uses the official Codex CLI. Sign in with ChatGPT and Omi will use your Codex allowance for desktop chat."
+    default:
+      return "Using your omi account."
+    }
+  }
+
+  @ViewBuilder
+  private var aiProviderStatusSection: some View {
+    switch chatBridgeMode {
+    case ChatProvider.BridgeMode.userClaude.rawValue:
+      if chatProvider?.isClaudeConnected == true {
+        Divider()
+
+        HStack {
+          Image(systemName: "checkmark.circle.fill")
+            .foregroundColor(.green)
+            .scaledFont(size: 12)
+          Text("Connected to Claude")
+            .scaledFont(size: 12)
+            .foregroundColor(OmiColors.textSecondary)
+
+          Spacer()
+
+          Button("Disconnect") {
+            Task {
+              await chatProvider?.disconnectClaude()
+            }
+          }
+          .buttonStyle(.plain)
+          .scaledFont(size: 12, weight: .medium)
+          .foregroundColor(.red)
+        }
+      }
+    case ChatProvider.BridgeMode.userCodex.rawValue:
+      Divider()
+
+      HStack {
+        Image(systemName: codexStatusIconName)
+          .foregroundColor(codexStatusColor)
+          .scaledFont(size: 12)
+        Text(chatProvider?.codexLoginState.statusText ?? "Checking Codex status...")
+          .scaledFont(size: 12)
+          .foregroundColor(OmiColors.textSecondary)
+
+        Spacer()
+
+        if chatProvider?.codexLoginState.isConnected == true {
+          Button("Disconnect") {
+            Task {
+              await chatProvider?.disconnectCodex()
+            }
+          }
+          .buttonStyle(.plain)
+          .scaledFont(size: 12, weight: .medium)
+          .foregroundColor(.red)
+        } else {
+          if chatProvider?.codexLoginState == .notInstalled {
+            Button("Install") {
+              chatProvider?.openCodexInstallGuide()
+            }
+            .buttonStyle(.plain)
+            .scaledFont(size: 12, weight: .medium)
+            .foregroundColor(Color.accentColor)
+          } else {
+            Button("Sign In") {
+              chatProvider?.startCodexAuth()
+            }
+            .buttonStyle(.plain)
+            .scaledFont(size: 12, weight: .medium)
+            .foregroundColor(Color.accentColor)
+          }
+
+          Button("Refresh") {
+            refreshAIProviderConnectionStatus()
+          }
+          .buttonStyle(.plain)
+          .scaledFont(size: 12, weight: .medium)
+          .foregroundColor(OmiColors.textTertiary)
+        }
+      }
+    default:
+      EmptyView()
+    }
+  }
+
+  private var codexStatusIconName: String {
+    switch chatProvider?.codexLoginState ?? .loggedOut {
+    case .chatGPT:
+      return "checkmark.circle.fill"
+    case .apiKey:
+      return "key.fill"
+    case .notInstalled:
+      return "arrow.down.circle.fill"
+    case .loggedOut, .unknown:
+      return "person.crop.circle.badge.exclamationmark"
+    }
+  }
+
+  private var codexStatusColor: Color {
+    switch chatProvider?.codexLoginState ?? .loggedOut {
+    case .chatGPT:
+      return .green
+    case .apiKey:
+      return OmiColors.warning
+    case .notInstalled, .loggedOut, .unknown:
+      return OmiColors.warning
+    }
+  }
+
+  private func refreshAIProviderConnectionStatus() {
+    chatProvider?.checkClaudeConnectionStatus()
+    chatProvider?.checkCodexConnectionStatus()
+  }
 
   private func fontShortcutRow(label: String, keys: String) -> some View {
     HStack {

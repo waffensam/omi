@@ -204,6 +204,27 @@ struct ChatPage: View {
         }
       )
     }
+    .sheet(isPresented: $chatProvider.isCodexAuthRequired) {
+      CodexAuthSheet(
+        loginState: chatProvider.codexLoginState,
+        onOpenInstallGuide: {
+          chatProvider.openCodexInstallGuide()
+        },
+        onOpenLogin: {
+          chatProvider.startCodexAuth()
+        },
+        onRefresh: {
+          chatProvider.checkCodexConnectionStatus()
+        },
+        onCancel: {
+          chatProvider.isCodexAuthRequired = false
+          Task {
+            await chatProvider.switchBridgeMode(to: ChatProvider.BridgeMode.omiAI)
+          }
+        }
+      )
+      .fixedSize()
+    }
     .alert("Upgrade Required", isPresented: $chatProvider.showOmiThresholdAlert) {
       Button("Upgrade to Omi Pro") {
         chatProvider.showOmiThresholdAlert = false

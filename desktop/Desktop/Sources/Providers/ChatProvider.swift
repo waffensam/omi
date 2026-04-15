@@ -501,18 +501,23 @@ A screenshot may be attached — use it silently only if relevant. Never mention
     /// When true, user can create multiple chat sessions
     @AppStorage("multiChatEnabled") var multiChatEnabled = false
 
-    // MARK: - Bridge (ACP-only, passApiKey controls OMI vs user's account)
+    // MARK: - Bridge (Claude ACP + Codex CLI)
     // NOTE: initialized lazily so it reads the persisted bridgeMode from UserDefaults,
     // not always defaulting to Omi mode on cold start.
     private lazy var acpBridge: ACPBridge = {
-        let isOmi = (UserDefaults.standard.string(forKey: "chatBridgeMode") ?? BridgeMode.omiAI.rawValue) != BridgeMode.userClaude.rawValue
+        let isOmi =
+            (UserDefaults.standard.string(forKey: "chatBridgeMode") ?? BridgeMode.omiAI.rawValue)
+            == BridgeMode.omiAI.rawValue
         return ACPBridge(passApiKey: isOmi)
     }()
+    private let codexBridge = CodexBridge()
     private var acpBridgeStarted = false
+    private var activeBridgeMode: BridgeMode
 
     enum BridgeMode: String {
         case omiAI = "agentSDK"
         case userClaude = "claudeCode"
+        case userCodex = "codexCli"
     }
     @AppStorage("chatBridgeMode") var bridgeMode: String = BridgeMode.omiAI.rawValue
 
@@ -524,6 +529,9 @@ A screenshot may be attached — use it silently only if relevant. Never mention
     @Published var claudeAuthUrl: String?
     /// Whether the user has a cached Claude OAuth token
     @Published var isClaudeConnected = false
+    /// Whether the Codex provider requires user action (install/login) before it can run.
+    @Published var isCodexAuthRequired = false
+    @Published var codexLoginState: CodexLoginState = .loggedOut
     /// Cumulative tokens used in the current session via Omi account
     @Published var sessionTokensUsed: Int = 0
     /// Cumulative USD cost spent using the Omi account, persisted across sessions.
@@ -616,14 +624,23 @@ A screenshot may be attached — use it silently only if relevant. Never mention
 
     // MARK: - Current Model
     var currentModel: String {
-        "Claude"
+        switch activeBridgeMode {
+        case .userCodex:
+            return "Codex"
+        case .omiAI, .userClaude:
+            return "Claude"
+        }
     }
 
     // MARK: - System Prompt
     // Prompts are defined in ChatPrompts.swift (converted from Python backend)
 
     init() {
-        log("ChatProvider initialized, will start Claude bridge on first use")
+        self.activeBridgeMode =
+            BridgeMode(rawValue: UserDefaults.standard.string(forKey: "chatBridgeMode") ?? BridgeMode.omiAI.rawValue)
+            ?? .omiAI
+
+        log("ChatProvider initialized, will start selected bridge on first use")
 
         // Observe changes to multiChatEnabled setting
         multiChatObserver = UserDefaults.standard.publisher(for: \.multiChatEnabled)
@@ -727,11 +744,31 @@ A screenshot may be attached — use it silently only if relevant. Never mention
 
     /// Whether we're currently in user's Claude account mode
     private var isUserClaudeMode: Bool {
-        bridgeMode == BridgeMode.userClaude.rawValue
+        activeBridgeMode == .userClaude
+    }
+
+    private var isUserCodexMode: Bool {
+        activeBridgeMode == .userCodex
     }
 
     /// Ensure the ACP bridge is started (restarts if the process died)
     private func ensureBridgeStarted() async -> Bool {
+        if isUserCodexMode {
+            let status = CodexCLI.loginStatus()
+            codexLoginState = status
+            if !status.isConnected {
+                isCodexAuthRequired = true
+                if case .notInstalled = status {
+                    errorMessage = "Codex CLI is not installed. Install it, then sign in with ChatGPT."
+                } else {
+                    errorMessage = "Sign in to Codex with ChatGPT to use this provider."
+                }
+                return false
+            }
+            isCodexAuthRequired = false
+            return true
+        }
+
         if acpBridgeStarted {
             let alive = await acpBridge.isAlive
             if !alive {
@@ -798,30 +835,40 @@ A screenshot may be attached — use it silently only if relevant. Never mention
         await loadSchemaIfNeeded()
     }
 
-    /// Switch between bridge modes (Omi AI vs user's Claude account)
+    /// Switch between bridge modes (Omi AI vs user's Claude account vs Codex)
     func switchBridgeMode(to mode: BridgeMode) async {
-        // Compare against the actual running bridge state, not bridgeMode (@AppStorage updates
-        // immediately when the Picker changes, so bridgeMode already equals `mode` by the time
-        // this function is called — the old string comparison always exits early).
-        guard (mode == .omiAI) != acpBridge.passApiKey else { return }
-        let oldMode = bridgeMode
-        log("ChatProvider: Switching bridge mode from \(bridgeMode) to \(mode.rawValue)")
+        guard mode != activeBridgeMode else { return }
+        let oldMode = activeBridgeMode.rawValue
+        log("ChatProvider: Switching bridge mode from \(oldMode) to \(mode.rawValue)")
 
-        // Stop the current bridge
-        await acpBridge.stop()
-        acpBridgeStarted = false
-
-        // Switch mode and recreate bridge with appropriate passApiKey
-        bridgeMode = mode.rawValue
-        acpBridge = ACPBridge(passApiKey: mode == .omiAI)
-        AnalyticsManager.shared.chatBridgeModeChanged(from: oldMode, to: mode.rawValue)
-
-        // Check Claude connection status when switching to user's Claude account
-        if mode == .userClaude {
-            checkClaudeConnectionStatus()
+        if activeBridgeMode != .userCodex {
+            await acpBridge.stop()
+            acpBridgeStarted = false
+        } else {
+            await codexBridge.interrupt()
         }
 
-        // Warm up the new bridge
+        bridgeMode = mode.rawValue
+        activeBridgeMode = mode
+        if mode != .userCodex {
+            acpBridge = ACPBridge(passApiKey: mode == .omiAI)
+        }
+        AnalyticsManager.shared.chatBridgeModeChanged(from: oldMode, to: mode.rawValue)
+
+        if mode == .userClaude {
+            checkClaudeConnectionStatus()
+            isCodexAuthRequired = false
+            _ = await ensureBridgeStarted()
+            return
+        }
+
+        if mode == .userCodex {
+            checkCodexConnectionStatus()
+            return
+        }
+
+        isClaudeAuthRequired = false
+        isCodexAuthRequired = false
         _ = await ensureBridgeStarted()
     }
 
@@ -865,6 +912,39 @@ A screenshot may be attached — use it silently only if relevant. Never mention
             isClaudeConnected = (secProcess.terminationStatus == 0)
         } catch {
             isClaudeConnected = false
+        }
+    }
+
+    func startCodexAuth() {
+        CodexCLI.openLoginInTerminal()
+    }
+
+    func openCodexInstallGuide() {
+        CodexCLI.openInstallGuide()
+    }
+
+    func checkCodexConnectionStatus() {
+        codexLoginState = CodexCLI.loginStatus()
+        if activeBridgeMode == .userCodex {
+            isCodexAuthRequired = !codexLoginState.isConnected
+        } else if codexLoginState.isConnected {
+            isCodexAuthRequired = false
+        }
+        if codexLoginState.isConnected {
+            errorMessage = nil
+        }
+    }
+
+    func disconnectCodex() async {
+        do {
+            try CodexCLI.logout()
+        } catch {
+            log("ChatProvider: Failed to log out from Codex — \(error.localizedDescription)")
+        }
+        codexLoginState = CodexCLI.loginStatus()
+        isCodexAuthRequired = false
+        if activeBridgeMode == .userCodex, !codexLoginState.isConnected {
+            errorMessage = "Disconnected from Codex."
         }
     }
 
@@ -1436,7 +1516,10 @@ A screenshot may be attached — use it silently only if relevant. Never mention
     /// Called once at warmup (via ensureBridgeStarted) and cached in cachedMainSystemPrompt.
     /// Conversation history is injected here so the brand-new ACP session starts with context
     /// from before the app launch. After session/new the ACP SDK owns history natively.
-    private func buildSystemPrompt(contextString: String) -> String {
+    private func buildSystemPrompt(
+        contextString: String,
+        excludingMessageIDs: Set<String> = []
+    ) -> String {
         // Get user name from AuthService
         let userName = AuthService.shared.displayName.isEmpty ? "there" : AuthService.shared.givenName
 
@@ -1462,7 +1545,7 @@ A screenshot may be attached — use it silently only if relevant. Never mention
         // Inject conversation history so the new ACP session has context from before app launch.
         // The ACP SDK maintains history natively after this via session/prompt — this only matters
         // at session creation time.
-        let history = buildConversationHistory()
+        let history = buildConversationHistory(excludingMessageIDs: excludingMessageIDs)
         if !history.isEmpty {
             prompt += "\n\n<conversation_history>\nBelow is the recent conversation history between you and the user. Use this to maintain continuity — the user can see these messages in the chat UI and expects you to be aware of them.\n\(history)\n</conversation_history>"
         }
@@ -1639,8 +1722,10 @@ A screenshot may be attached — use it silently only if relevant. Never mention
 
     /// Formats the last 10 non-empty messages in the current session as a conversation history string.
     /// Used to seed new ACP sessions with context from the existing chat UI history.
-    private func buildConversationHistory() -> String {
-        let recent = messages.filter { !$0.text.isEmpty }.suffix(10)
+    private func buildConversationHistory(excludingMessageIDs: Set<String> = []) -> String {
+        let recent = messages.filter {
+            !$0.text.isEmpty && !excludingMessageIDs.contains($0.id)
+        }.suffix(10)
         return recent.map { msg in
             let role = msg.sender == .user ? "User" : "Assistant"
             return "\(role): \(msg.text)"
@@ -2027,7 +2112,11 @@ A screenshot may be attached — use it silently only if relevant. Never mention
         guard isSending else { return }
         isStopping = true
         Task {
-            await acpBridge.interrupt()
+            if self.isUserCodexMode {
+                await self.codexBridge.interrupt()
+            } else {
+                await self.acpBridge.interrupt()
+            }
         }
         // Result flows back normally through the bridge with partial text
     }
@@ -2074,7 +2163,11 @@ A screenshot may be attached — use it silently only if relevant. Never mention
         // When sendMessage finishes (due to the interrupt), it checks
         // pendingFollowUpText and chains a new full query automatically.
         pendingFollowUpText = trimmedText
-        await acpBridge.interrupt()
+        if isUserCodexMode {
+            await codexBridge.interrupt()
+        } else {
+            await acpBridge.interrupt()
+        }
         log("ChatProvider: follow-up queued, interrupt sent")
     }
 
@@ -2134,22 +2227,26 @@ A screenshot may be attached — use it silently only if relevant. Never mention
 
         // Monthly free-tier limit shared with the floating bar (30 messages/month).
         // Block the send, surface the popup, and let the user upgrade.
-        let usageLimiter = FloatingBarUsageLimiter.shared
-        if usageLimiter.isLimitReached {
-            log("ChatProvider: sendMessage blocked — free-tier monthly chat limit reached")
-            errorMessage = "You've hit your monthly limit of \(FloatingBarUsageLimiter.monthlyFreeLimit) free messages. Upgrade to keep chatting."
-            NotificationCenter.default.post(
-                name: .showUsageLimitPopup,
-                object: nil,
-                userInfo: ["reason": "chat"]
-            )
-            return
+        if bridgeMode == BridgeMode.omiAI.rawValue {
+            let usageLimiter = FloatingBarUsageLimiter.shared
+            if usageLimiter.isLimitReached {
+                log("ChatProvider: sendMessage blocked — free-tier monthly chat limit reached")
+                errorMessage = "You've hit your monthly limit of \(FloatingBarUsageLimiter.monthlyFreeLimit) free messages. Upgrade to keep chatting."
+                NotificationCenter.default.post(
+                    name: .showUsageLimitPopup,
+                    object: nil,
+                    userInfo: ["reason": "chat"]
+                )
+                return
+            }
+            usageLimiter.recordQuery()
         }
-        usageLimiter.recordQuery()
 
         // Ensure bridge is running
         guard await ensureBridgeStarted() else {
-            errorMessage = "AI not available"
+            if errorMessage == nil {
+                errorMessage = "AI not available"
+            }
             return
         }
 
@@ -2246,8 +2343,7 @@ A screenshot may be attached — use it silently only if relevant. Never mention
         let queryStartTime = Date()
         var toolNames: [String] = []
         var toolStartTimes: [String: Date] = [:]
-        var sqlRowsReturned = 0
-        var sqlQueryCount = 0
+        let sqlStatsTracker = SQLQueryStatsTracker()
 
         do {
             // Use the system prompt built at warmup. The ACP bridge applies it only
@@ -2261,7 +2357,14 @@ A screenshot may be attached — use it silently only if relevant. Never mention
                 // with the onboarding deep-dive step.
                 systemPrompt = prefix
             } else {
-                systemPrompt = cachedMainSystemPrompt
+                if isUserCodexMode {
+                    systemPrompt = buildSystemPrompt(
+                        contextString: formatMemoriesSection(),
+                        excludingMessageIDs: [userMessageId, aiMessageId]
+                    )
+                } else {
+                    systemPrompt = cachedMainSystemPrompt
+                }
                 if let prefix = systemPromptPrefix, !prefix.isEmpty {
                     systemPrompt = prefix + "\n\n" + systemPrompt
                 }
@@ -2297,15 +2400,7 @@ A screenshot may be attached — use it silently only if relevant. Never mention
                 let toolCall = ToolCall(name: name, arguments: input, thoughtSignature: nil)
                 let result = await ChatToolExecutor.execute(toolCall)
                 log("OMI tool \(name) executed for callId=\(callId)")
-                // Track SQL query stats for metadata
-                if name == "execute_sql" {
-                    sqlQueryCount += 1
-                    // Parse row count from result (format: "\nN row(s)" at end)
-                    if let match = result.range(of: #"(\d+) row\(s\)"#, options: .regularExpression) {
-                        let numStr = result[match].components(separatedBy: " ").first ?? "0"
-                        sqlRowsReturned += Int(numStr) ?? 0
-                    }
-                }
+                await sqlStatsTracker.record(toolName: name, result: result)
                 return result
             }
             let toolActivityHandler: ACPBridge.ToolActivityHandler = { [weak self] name, status, toolUseId, input in
@@ -2361,34 +2456,55 @@ A screenshot may be attached — use it silently only if relevant. Never mention
                 }
             }
 
-            let queryResult = try await acpBridge.query(
-                prompt: trimmedText,
-                systemPrompt: systemPrompt,
-                sessionKey: isOnboarding ? "onboarding" : (sessionKey ?? "main"),
-                cwd: workingDirectory,
-                mode: chatMode.rawValue,
-                model: model ?? modelOverride,
-                resume: resume,
-                imageData: effectiveImageData,
-                onTextDelta: textDeltaHandler,
-                onToolCall: toolCallHandler,
-                onToolActivity: toolActivityHandler,
-                onThinkingDelta: thinkingDeltaHandler,
-                onToolResultDisplay: toolResultDisplayHandler,
-                onAuthRequired: { [weak self] methods, authUrl in
-                    Task { @MainActor [weak self] in
-                        self?.claudeAuthMethods = methods
-                        self?.claudeAuthUrl = authUrl
-                        self?.isClaudeAuthRequired = true
+            let queryResult: ACPBridge.QueryResult
+            if isUserCodexMode {
+                queryResult = try await codexBridge.query(
+                    prompt: trimmedText,
+                    systemPrompt: systemPrompt,
+                    sessionKey: isOnboarding ? "onboarding" : (sessionKey ?? "main"),
+                    cwd: workingDirectory,
+                    mode: chatMode.rawValue,
+                    model: model ?? modelOverride,
+                    resume: resume,
+                    imageData: effectiveImageData,
+                    onTextDelta: textDeltaHandler,
+                    onToolCall: toolCallHandler,
+                    onToolActivity: toolActivityHandler,
+                    onThinkingDelta: thinkingDeltaHandler,
+                    onToolResultDisplay: toolResultDisplayHandler,
+                    onAuthRequired: { _, _ in },
+                    onAuthSuccess: {}
+                )
+            } else {
+                queryResult = try await acpBridge.query(
+                    prompt: trimmedText,
+                    systemPrompt: systemPrompt,
+                    sessionKey: isOnboarding ? "onboarding" : (sessionKey ?? "main"),
+                    cwd: workingDirectory,
+                    mode: chatMode.rawValue,
+                    model: model ?? modelOverride,
+                    resume: resume,
+                    imageData: effectiveImageData,
+                    onTextDelta: textDeltaHandler,
+                    onToolCall: toolCallHandler,
+                    onToolActivity: toolActivityHandler,
+                    onThinkingDelta: thinkingDeltaHandler,
+                    onToolResultDisplay: toolResultDisplayHandler,
+                    onAuthRequired: { [weak self] methods, authUrl in
+                        Task { @MainActor [weak self] in
+                            self?.claudeAuthMethods = methods
+                            self?.claudeAuthUrl = authUrl
+                            self?.isClaudeAuthRequired = true
+                        }
+                    },
+                    onAuthSuccess: { [weak self] in
+                        Task { @MainActor [weak self] in
+                            self?.isClaudeAuthRequired = false
+                            self?.checkClaudeConnectionStatus()
+                        }
                     }
-                },
-                onAuthSuccess: { [weak self] in
-                    Task { @MainActor [weak self] in
-                        self?.isClaudeAuthRequired = false
-                        self?.checkClaudeConnectionStatus()
-                    }
-                }
-            )
+                )
+            }
 
             // Flush any remaining buffered streaming text before finalizing
             streamingFlushWorkItem?.cancel()
@@ -2398,6 +2514,7 @@ A screenshot may be attached — use it silently only if relevant. Never mention
             // Determine the final text to display and save
             let messageText: String
             if let index = messages.firstIndex(where: { $0.id == aiMessageId }) {
+                let sqlStats = await sqlStatsTracker.snapshot()
                 // Message still in memory — update it in-place
                 messageText = messages[index].text.isEmpty ? queryResult.text : messages[index].text
                 messages[index].text = messageText
@@ -2413,8 +2530,8 @@ A screenshot may be attached — use it silently only if relevant. Never mention
                     hasScreenshot: imageData != nil,
                     screenshotSizeBytes: imageData?.count,
                     toolNames: toolNames,
-                    sqlRowsReturned: sqlRowsReturned,
-                    sqlQueryCount: sqlQueryCount
+                    sqlRowsReturned: sqlStats.rowsReturned,
+                    sqlQueryCount: sqlStats.queryCount
                 )
                 completeRemainingToolCalls(messageId: aiMessageId)
             } else {
@@ -2487,7 +2604,7 @@ A screenshot may be attached — use it silently only if relevant. Never mention
             }
 
             // Persist the ACP session ID during onboarding so we can resume after app restart
-            if isOnboarding && !queryResult.sessionId.isEmpty {
+            if isOnboarding && !queryResult.sessionId.isEmpty && !isUserCodexMode {
                 OnboardingChatPersistence.saveSessionId(queryResult.sessionId)
             }
 
@@ -2534,7 +2651,11 @@ A screenshot may be attached — use it silently only if relevant. Never mention
             // On timeout, cancel the stuck ACP session so it's not left dangling
             if let bridgeError = error as? BridgeError, case .timeout = bridgeError {
                 log("ChatProvider: ACP query timed out, sending interrupt to cancel stuck session")
-                await acpBridge.interrupt()
+                if isUserCodexMode {
+                    await codexBridge.interrupt()
+                } else {
+                    await acpBridge.interrupt()
+                }
             }
 
             // Flush any remaining buffered streaming text before handling the error
@@ -3002,5 +3123,24 @@ A screenshot may be attached — use it silently only if relevant. Never mention
         if !older.isEmpty { groups.append(("Older", older)) }
 
         return groups
+    }
+}
+
+private actor SQLQueryStatsTracker {
+    private var rowsReturned = 0
+    private var queryCount = 0
+
+    func record(toolName: String, result: String) {
+        guard toolName == "execute_sql" else { return }
+
+        queryCount += 1
+        if let match = result.range(of: #"(\d+) row\(s\)"#, options: .regularExpression) {
+            let numStr = result[match].components(separatedBy: " ").first ?? "0"
+            rowsReturned += Int(numStr) ?? 0
+        }
+    }
+
+    func snapshot() -> (rowsReturned: Int, queryCount: Int) {
+        (rowsReturned, queryCount)
     }
 }

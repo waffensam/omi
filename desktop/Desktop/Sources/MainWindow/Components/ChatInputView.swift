@@ -31,48 +31,48 @@ struct ChatInputView: View {
     /// placeholder overlay — guaranteeing the cursor and placeholder align.
     private let inputPaddingH: CGFloat = 12
     private let inputPaddingV: CGFloat = 12
+    private let maxInputHeight: CGFloat = 200
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             // Input field with floating toggle
             ZStack(alignment: .topTrailing) {
-                // Hidden Text drives the SwiftUI height; OmiTextEditor overlays it exactly.
-                // This lets SwiftUI measure height from text content without fighting AppKit's
-                // scroll view layout — the onHeightChange pattern caused layout loops inside
-                // the TaskChatPanel VStack with frame(maxHeight: .infinity).
-                Text(inputText.isEmpty ? " " : inputText + " ")
-                    .scaledFont(size: 14)
-                    .padding(.horizontal, inputPaddingH)
-                    .padding(.vertical, inputPaddingV)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .opacity(0)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-                    .overlay(alignment: .topLeading) {
+                ZStack(alignment: .topLeading) {
+                    // Hidden Text drives the SwiftUI height while the editor stays in the
+                    // same capped container, so once the input reaches max height the
+                    // NSTextView can scroll instead of being visually clipped.
+                    Text(inputText.isEmpty ? " " : inputText + " ")
+                        .scaledFont(size: 14)
+                        .padding(.horizontal, inputPaddingH)
+                        .padding(.vertical, inputPaddingV)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .opacity(0)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+
+                    OmiTextEditor(
+                        text: $inputText,
+                        fontSize: round(14 * fontScale),
+                        textColor: NSColor(OmiColors.textPrimary),
+                        textContainerInset: NSSize(width: inputPaddingH, height: inputPaddingV),
+                        onSubmit: handleSubmit
+                    )
+
+                    if inputText.isEmpty {
                         // Placeholder text — padding matches textContainerInset exactly
-                        if inputText.isEmpty {
-                            Text(placeholder)
-                                .scaledFont(size: 14)
-                                .foregroundColor(OmiColors.textTertiary)
-                                .padding(.horizontal, inputPaddingH)
-                                .padding(.vertical, inputPaddingV)
-                                .allowsHitTesting(false)
-                        }
+                        Text(placeholder)
+                            .scaledFont(size: 14)
+                            .foregroundColor(OmiColors.textTertiary)
+                            .padding(.horizontal, inputPaddingH)
+                            .padding(.vertical, inputPaddingV)
+                            .allowsHitTesting(false)
                     }
-                    .overlay {
-                        OmiTextEditor(
-                            text: $inputText,
-                            fontSize: round(14 * fontScale),
-                            textColor: NSColor(OmiColors.textPrimary),
-                            textContainerInset: NSSize(width: inputPaddingH, height: inputPaddingV),
-                            onSubmit: handleSubmit
-                        )
-                    }
-                    .frame(maxHeight: 200)
-                    .clipped()
-                    .background(OmiColors.backgroundTertiary)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+                .frame(maxHeight: maxInputHeight)
+                .clipped()
+                .background(OmiColors.backgroundTertiary)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 // Floating Ask/Act toggle (top-right, inside the input area)
                 if askModeEnabled {
