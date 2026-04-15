@@ -1,5 +1,7 @@
 {
-  "unreleased": [],
+  "unreleased": [
+    "Fixed garbled non-English text showing up in desktop notifications and reminders"
+  ],
   "releases": [
     {
       "version": "0.11.318",

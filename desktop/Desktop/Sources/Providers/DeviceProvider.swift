@@ -431,8 +431,8 @@ final class DeviceProvider: ObservableObject {
 
         // Send low battery notification
         let content = UNMutableNotificationContent()
-        content.title = "Low Battery Alert"
-        content.body = "Your omi device is running low on battery. Time for a recharge! 🔋"
+        content.title = NotificationTextSanitizer.sanitize("Low Battery Alert")
+        content.body = NotificationTextSanitizer.sanitize("Your omi device is running low on battery. Time for a recharge! 🔋")
         content.sound = .default
 
         let request = UNNotificationRequest(
@@ -534,8 +534,8 @@ final class DeviceProvider: ObservableObject {
 
     private func sendDisconnectNotification() {
         let content = UNMutableNotificationContent()
-        content.title = "Your omi Device Disconnected"
-        content.body = "Please reconnect to continue using your omi."
+        content.title = NotificationTextSanitizer.sanitize("Your omi Device Disconnected")
+        content.body = NotificationTextSanitizer.sanitize("Please reconnect to continue using your omi.")
         content.sound = .default
 
         let request = UNNotificationRequest(
@@ -692,8 +692,8 @@ extension DeviceProvider: DeviceConnectionDelegate {
 
             // Send fall detection notification
             let content = UNMutableNotificationContent()
-            content.title = "Fall Detected"
-            content.body = "A potential fall was detected by your omi device."
+            content.title = NotificationTextSanitizer.sanitize("Fall Detected")
+            content.body = NotificationTextSanitizer.sanitize("A potential fall was detected by your omi device.")
             content.sound = .default
 
             let request = UNNotificationRequest(

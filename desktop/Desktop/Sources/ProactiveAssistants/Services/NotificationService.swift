@@ -214,12 +214,27 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         context: FloatingBarNotificationContext? = nil,
         screenshotData: Data? = nil
     ) {
+        let sanitizedTitle = NotificationTextSanitizer.sanitize(title)
+        let sanitizedMessage = NotificationTextSanitizer.sanitize(message)
+        let sanitizedContext = context.map {
+            FloatingBarNotificationContext(
+                sourceTitle: NotificationTextSanitizer.sanitize($0.sourceTitle),
+                assistantId: $0.assistantId,
+                sourceApp: $0.sourceApp.map(NotificationTextSanitizer.sanitize),
+                windowTitle: $0.windowTitle.map(NotificationTextSanitizer.sanitize),
+                contextSummary: $0.contextSummary.map(NotificationTextSanitizer.sanitize),
+                currentActivity: $0.currentActivity.map(NotificationTextSanitizer.sanitize),
+                reasoning: $0.reasoning.map(NotificationTextSanitizer.sanitize),
+                detail: $0.detail.map(NotificationTextSanitizer.sanitize)
+            )
+        }
+
         // Rate-limit the screen-capture reset notification to one per broken-capture
         // episode. The recovery loop in ProactiveAssistantsPlugin.attemptAutoReset
         // re-fires this on every session (soft-recovery + app restart), which buried
         // users in duplicate banners when a stale TCC csreq from an auto-update made
         // the capture path unrecoverable without a manual toggle in System Settings.
-        if title == Self.screenCaptureResetTitle {
+        if sanitizedTitle == Self.screenCaptureResetTitle {
             if UserDefaults.standard.bool(forKey: Self.screenCaptureResetShownKey) {
                 log("NotificationService: suppressing duplicate screen capture reset notification")
                 return
@@ -228,11 +243,11 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         }
 
         FloatingControlBarManager.shared.showNotification(
-            title: title,
-            message: message,
+            title: sanitizedTitle,
+            message: sanitizedMessage,
             assistantId: assistantId,
             sound: sound,
-            context: context,
+            context: sanitizedContext,
             screenshotData: screenshotData
         )
 
@@ -241,7 +256,7 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
             Task { @MainActor in
                 guard settings.authorizationStatus == .authorized else {
-                    log("Notification skipped (auth=\(settings.authorizationStatus.rawValue)): \(title)")
+                    log("Notification skipped (auth=\(settings.authorizationStatus.rawValue)): \(sanitizedTitle)")
 
                     // If auth reverted to notDetermined (not explicitly denied), trigger repair.
                     // Debounce: at most once per 10 minutes to avoid hammering lsregister.
@@ -262,7 +277,12 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
                     return
                 }
 
-                self?.deliverNotification(title: title, message: message, assistantId: assistantId, sound: sound)
+                self?.deliverNotification(
+                    title: sanitizedTitle,
+                    message: sanitizedMessage,
+                    assistantId: assistantId,
+                    sound: sound
+                )
             }
         }
     }

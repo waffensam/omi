@@ -75,6 +75,8 @@ struct OCRResult: Codable, Equatable {
 actor RewindOCRService {
     static let shared = RewindOCRService()
 
+    static let defaultRecognitionLanguages = ["en-US", "zh-Hans", "zh-Hant", "ja-JP", "ko-KR"]
+
     private init() {}
 
     // MARK: - Frame Deduplication
@@ -87,7 +89,54 @@ actor RewindOCRService {
     private let dedupThreshold = 5
 
     /// Track last-logged OCR mode to only log on change
-    private var lastLoggedOCRMode: String?
+    private var lastLoggedOCRConfiguration: String?
+
+    static func preferredRecognitionLanguages(from preferredLanguages: [String] = Locale.preferredLanguages) -> [String] {
+        var languages: [String] = []
+
+        func append(_ identifier: String?) {
+            guard let identifier, !identifier.isEmpty, !languages.contains(identifier) else { return }
+            languages.append(identifier)
+        }
+
+        for preferred in preferredLanguages {
+            append(normalizedRecognitionLanguage(for: preferred))
+        }
+
+        for fallback in defaultRecognitionLanguages {
+            append(fallback)
+        }
+
+        return Array(languages.prefix(6))
+    }
+
+    private static func normalizedRecognitionLanguage(for identifier: String) -> String? {
+        let canonical = identifier.replacingOccurrences(of: "_", with: "-")
+        let lower = canonical.lowercased()
+
+        if lower.hasPrefix("zh-hant") || lower.contains("-hant") {
+            return "zh-Hant"
+        }
+        if lower.hasPrefix("zh-hans") || lower.contains("-hans") || lower.hasPrefix("zh") {
+            return "zh-Hans"
+        }
+        if lower.hasPrefix("ja") {
+            return "ja-JP"
+        }
+        if lower.hasPrefix("ko") {
+            return "ko-KR"
+        }
+        if lower.hasPrefix("en") {
+            return "en-US"
+        }
+
+        let parts = canonical.split(separator: "-")
+        guard let language = parts.first else { return nil }
+        if parts.count >= 2 {
+            return "\(language.lowercased())-\(parts[1].uppercased())"
+        }
+        return String(language.lowercased())
+    }
 
     /// Compute a perceptual difference hash (dHash) of a CGImage.
     /// Downscales to 9x8 grayscale, then compares each pixel to its right neighbor
@@ -152,14 +201,17 @@ actor RewindOCRService {
         let useFastOCR = UserDefaults.standard.object(forKey: "rewindOCRFast") as? Bool ?? true
         let modeName = useFastOCR ? "fast" : "accurate"
         let recognitionLevel: VNRequestTextRecognitionLevel = useFastOCR ? .fast : .accurate
+        let recognitionLanguages = Self.preferredRecognitionLanguages()
+        let configurationSummary = "\(modeName)|\(recognitionLanguages.joined(separator: ","))"
 
         // Log OCR mode once, then only on change; set Sentry tag for queryability
-        if modeName != lastLoggedOCRMode {
-            log("RewindOCRService: OCR mode set to \(modeName)")
+        if configurationSummary != lastLoggedOCRConfiguration {
+            log("RewindOCRService: OCR mode set to \(modeName) languages=\(recognitionLanguages.joined(separator: ","))")
             SentrySDK.configureScope { scope in
                 scope.setTag(value: modeName, key: "ocr_mode")
+                scope.setTag(value: recognitionLanguages.joined(separator: ","), key: "ocr_languages")
             }
-            lastLoggedOCRMode = modeName
+            lastLoggedOCRConfiguration = configurationSummary
         }
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -213,7 +265,8 @@ actor RewindOCRService {
 
             request.recognitionLevel = recognitionLevel
             request.usesLanguageCorrection = false
-            request.recognitionLanguages = ["en-US"]
+            request.recognitionLanguages = recognitionLanguages
+            request.automaticallyDetectsLanguage = true
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
 
