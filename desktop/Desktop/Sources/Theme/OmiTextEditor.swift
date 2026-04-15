@@ -87,7 +87,12 @@ struct OmiTextEditor: NSViewRepresentable {
         // correct task's draftText when SwiftUI reuses this NSView across tasks.
         context.coordinator.updateTextBinding($text)
 
-        if textView.string != text {
+        let isComposingMarkedText = textView.hasMarkedText()
+
+        // Avoid clobbering the active input-method composition session. Replacing
+        // the NSTextView contents while marked text exists can cancel Chinese/Japanese
+        // IME composition and drop the partially typed phonetics.
+        if textView.string != text, !isComposingMarkedText {
             context.coordinator.isUpdating = true
             textView.string = text
             context.coordinator.isUpdating = false

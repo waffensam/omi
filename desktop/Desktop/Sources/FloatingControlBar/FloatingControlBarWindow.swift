@@ -104,6 +104,22 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
+    private func enableConversationInputModeIfNeeded() {
+        if styleMask.contains(.nonactivatingPanel) {
+            styleMask.remove(.nonactivatingPanel)
+        }
+
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func restorePassivePanelModeIfNeeded() {
+        if !styleMask.contains(.nonactivatingPanel) {
+            styleMask.insert(.nonactivatingPanel)
+        }
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape
             handleEscapeKey()
@@ -282,8 +298,17 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
             return nil
         }
         if let textView = findTextView(in: contentView) {
-            makeKeyAndOrderFront(nil)
-            makeFirstResponder(textView)
+            if state.showingAIConversation {
+                enableConversationInputModeIfNeeded()
+            }
+
+            if !isKeyWindow {
+                makeKeyAndOrderFront(nil)
+            }
+
+            if firstResponder !== textView {
+                makeFirstResponder(textView)
+            }
             return true
         }
         return false
@@ -358,6 +383,7 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
             // Without this guard, a rapid PTT query that fires within 0.35s gets collapsed
             // back to the pill position by this stale completion block.
             guard !self.state.showingAIConversation else { return }
+            self.restorePassivePanelModeIfNeeded()
             if self.frame != targetFrame {
                 self.setFrame(targetFrame, display: true, animate: false)
             }
@@ -393,6 +419,8 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
     func showAIConversation() {
         resizeWorkItem?.cancel()
         resizeWorkItem = nil
+
+        enableConversationInputModeIfNeeded()
 
         let shouldRestoreVisibleConversation = state.canRestoreVisibleConversation
         if !shouldRestoreVisibleConversation && state.hasVisibleConversation {
